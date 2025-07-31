@@ -1,260 +1,439 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AssessmentResult, UploadResponse } from '@/app/types';
+import OpenAI from 'openai';
 
-// Real AI phone identification function
-async function identifyPhoneModel(imageUrl: string): Promise<{
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Test cases for validation
+const TEST_CASES = {
+  phoneIdentification: {
+    valid: {
+      make: "Apple",
+      model: "iPhone 14 Pro",
+      color: "Space Black",
+      year: "2022",
+      storage: "256GB",
+      screen_size: "6.1-inch",
+      confidence: 0.95
+    },
+    required: ['make', 'model', 'color', 'confidence']
+  },
+  damageAssessment: {
+    valid: {
+      damage_type: "cracked_screen",
+      severity: "high",
+      affected_areas: ["front_screen", "touch_functionality"],
+      description: "Severe crack across the entire front screen with touch sensitivity issues",
+      estimated_repair_time: "2-3 hours",
+      confidence: 0.9
+    },
+    required: ['damage_type', 'severity', 'affected_areas', 'description', 'estimated_repair_time', 'confidence']
+  },
+  costEstimation: {
+    valid: {
+      repair_cost: { min: 300, max: 600, currency: "USD" },
+      replacement_cost: { amount: 1299, currency: "USD" },
+      confidence: 0.85
+    },
+    required: ['repair_cost', 'replacement_cost', 'confidence']
+  }
+};
+
+// Helper function to validate JSON structure
+function validateResponse(data: any, testCase: any, stepName: string): { isValid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  
+  // Check if all required fields are present
+  for (const field of testCase.required) {
+    if (!(field in data)) {
+      errors.push(`Missing required field: ${field}`);
+    }
+  }
+  
+  // Type validation
+  if (data.confidence !== undefined && (typeof data.confidence !== 'number' || data.confidence < 0 || data.confidence > 1)) {
+    errors.push('Confidence must be a number between 0 and 1');
+  }
+  
+  if (data.severity !== undefined && !['low', 'medium', 'high', 'critical'].includes(data.severity)) {
+    errors.push('Severity must be one of: low, medium, high, critical');
+  }
+  
+  if (data.affected_areas !== undefined && (!Array.isArray(data.affected_areas) || data.affected_areas.length === 0)) {
+    errors.push('Affected areas must be a non-empty array');
+  }
+  
+  if (data.repair_cost !== undefined && (!data.repair_cost.min || !data.repair_cost.max || !data.repair_cost.currency)) {
+    errors.push('Repair cost must have min, max, and currency fields');
+  }
+  
+  if (data.replacement_cost !== undefined && (!data.replacement_cost.amount || !data.replacement_cost.currency)) {
+    errors.push('Replacement cost must have amount and currency fields');
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
+}
+
+// Helper function to clean and parse JSON response
+function parseAIResponse(content: string, stepName: string): any {
+  let cleanedContent = content || '{}';
+  
+  console.log(`🔍 Raw AI response (${stepName}):`, cleanedContent);
+  
+  // Clean up markdown formatting if present
+  if (cleanedContent.includes('```json')) {
+    cleanedContent = cleanedContent.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+  }
+  
+  // Remove any leading/trailing whitespace
+  cleanedContent = cleanedContent.trim();
+  
+  console.log(`🔍 Cleaned content (${stepName}):`, cleanedContent);
+  
+  try {
+    const parsed = JSON.parse(cleanedContent);
+    return parsed;
+  } catch (error) {
+    console.error(`❌ JSON parsing failed for ${stepName}:`, error);
+    console.error(`❌ Failed content:`, cleanedContent);
+    throw new Error(`Invalid JSON response from AI for ${stepName}: ${cleanedContent}`);
+  }
+}
+
+// Step 1: Phone Identification
+async function identifyPhone(imageUrl: string): Promise<{
   make: string;
   model: string;
   color: string;
   year?: string;
+  storage?: string;
+  screen_size?: string;
   confidence: number;
 }> {
+  const phoneIdentificationPrompt = `
+Analyze this phone image and identify the device specifications.
+
+Return ONLY a valid JSON object with these fields:
+- make (string)
+- model (string) 
+- color (string)
+- year (string, optional)
+- storage (string, optional)
+- screen_size (string, optional)
+- confidence (number between 0 and 1)
+
+Example: {"make": "Apple", "model": "iPhone 14 Pro", "color": "Space Black", "year": "2022", "storage": "256GB", "screen_size": "6.1-inch", "confidence": 0.95}
+`;
+
   try {
-    // Option 1: Google Vision API (recommended for production)
-    // const vision = require('@google-cloud/vision');
-    // const client = new vision.ImageAnnotatorClient();
-    // const [result] = await client.objectLocalization(imageUrl);
-    // const objects = result.localizedObjectAnnotations;
-    // return analyzeVisionResults(objects);
+    console.log('🔍 Step 1: Identifying phone...');
+    
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: phoneIdentificationPrompt },
+          { type: "image_url", image_url: { url: imageUrl } }
+        ]
+      }]
+    });
 
-    // Option 2: OpenAI GPT-4 Vision (for detailed analysis)
-    // const OpenAI = require('openai');
-    // const openai = new OpenAI();
-    // const response = await openai.chat.completions.create({
-    //   model: "gpt-4-vision-preview",
-    //   messages: [
-    //     {
-    //       role: "user",
-    //       content: [
-    //         { type: "text", text: "Analyze this phone image and identify: 1) Make (Apple, Samsung, etc.) 2) Model (iPhone 14, Galaxy S23, etc.) 3) Color 4) Year if visible. Return as JSON." },
-    //         { type: "image_url", image_url: { url: imageUrl } }
-    //       ]
-    //     }
-    //   ]
-    // });
-    // return parseOpenAIResponse(response.choices[0].message.content);
-
-    // Option 3: Custom ML Model (for specialized phone recognition)
-    // const modelResponse = await fetch('https://your-ml-endpoint.com/identify-phone', {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify({ imageUrl })
-    // });
-    // return await modelResponse.json();
-
-    // For now, using enhanced mock with image analysis hints
-    return await enhancedMockIdentification(imageUrl);
+    const result = parseAIResponse(response.choices[0].message.content || '{}', 'phone identification');
+    
+    // Validate the response
+    const validation = validateResponse(result, TEST_CASES.phoneIdentification, 'phone identification');
+    if (!validation.isValid) {
+      console.error(`❌ Phone identification validation failed:`, validation.errors);
+      throw new Error(`Phone identification failed validation: ${validation.errors.join(', ')}`);
+    }
+    
+    console.log('✅ Phone identification successful:', result);
+    
+    return {
+      make: result.make || 'Unknown',
+      model: result.model || 'Unknown',
+      color: result.color || 'Unknown',
+      year: result.year,
+      storage: result.storage,
+      screen_size: result.screen_size,
+      confidence: result.confidence || 0.8
+    };
   } catch (error) {
-    console.error('Phone identification error:', error);
-    // Fallback to basic mock
-    return getRandomPhoneModel();
+    console.error('❌ Phone identification error:', error);
+    throw new Error(`Phone identification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
 
-// Enhanced mock that simulates real AI analysis
-async function enhancedMockIdentification(imageUrl: string) {
-  // Simulate AI processing
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  
-  // In a real implementation, you would:
-  // 1. Download and analyze the image
-  // 2. Use computer vision to detect phone features
-  // 3. Compare against a database of phone models
-  // 4. Use ML to classify the specific model
-  
-  const phoneDatabase = {
-    'iPhone 5s': {
-      make: 'Apple',
-      model: 'iPhone 5s',
-      color: 'Space Gray',
-      year: '2013',
-      features: ['4-inch display', 'Touch ID', 'A7 chip', '8MP camera']
-    },
-    'iPhone 6': {
-      make: 'Apple',
-      model: 'iPhone 6',
-      color: 'Space Gray',
-      year: '2014',
-      features: ['4.7-inch display', 'Touch ID', 'A8 chip', '8MP camera']
-    },
-    'iPhone 14': {
-      make: 'Apple',
-      model: 'iPhone 14',
-      color: 'Blue',
-      year: '2022',
-      features: ['6.1-inch display', 'Face ID', 'A15 chip', '12MP camera']
-    },
-    'Galaxy S23': {
-      make: 'Samsung',
-      model: 'Galaxy S23',
-      color: 'Phantom Black',
-      year: '2023',
-      features: ['6.1-inch display', 'Fingerprint sensor', 'Snapdragon 8 Gen 2']
+// Step 2: Damage Assessment
+async function assessDamage(imageUrl: string): Promise<{
+  damage_type: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  affected_areas: string[];
+  description: string;
+  estimated_repair_time: string;
+  confidence: number;
+}> {
+  const damageAssessmentPrompt = `
+Given this phone image, assess the damage.
+
+Return ONLY a valid JSON object with these fields:
+- damage_type (string)
+- severity (string: "low", "medium", "high", "critical")
+- affected_areas (array of strings)
+- description (string)
+- estimated_repair_time (string)
+- confidence (number between 0 and 1)
+
+Example: {"damage_type": "cracked_screen", "severity": "high", "affected_areas": ["front_screen", "touch_functionality"], "description": "Severe crack across the entire front screen with touch sensitivity issues", "estimated_repair_time": "2-3 hours", "confidence": 0.9}
+`;
+
+  try {
+    console.log('🔍 Step 2: Assessing damage...');
+    
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: damageAssessmentPrompt },
+          { type: "image_url", image_url: { url: imageUrl } }
+        ]
+      }]
+    });
+
+    const result = parseAIResponse(response.choices[0].message.content || '{}', 'damage assessment');
+    
+    // Validate the response
+    const validation = validateResponse(result, TEST_CASES.damageAssessment, 'damage assessment');
+    if (!validation.isValid) {
+      console.error(`❌ Damage assessment validation failed:`, validation.errors);
+      throw new Error(`Damage assessment failed validation: ${validation.errors.join(', ')}`);
     }
-  };
-
-  // Simulate AI analysis based on image URL
-  // In reality, you would analyze the actual image content
-  const imageAnalysis = await analyzeImageFeatures(imageUrl);
-  
-  // Use analysis to determine most likely phone
-  const identifiedPhone = determinePhoneFromFeatures(imageAnalysis, phoneDatabase);
-  
-  return {
-    ...identifiedPhone,
-    confidence: 0.85 + Math.random() * 0.1
-  };
-}
-
-// Simulate image feature analysis
-async function analyzeImageFeatures(imageUrl: string) {
-  // In real implementation, this would:
-  // 1. Download the image
-  // 2. Use computer vision to extract features
-  // 3. Analyze screen size, camera placement, button layout, etc.
-  
-  // Mock feature extraction
-  const features = {
-    screenSize: '4-inch', // iPhone 5s characteristic
-    hasHomeButton: true,   // iPhone 5s has physical home button
-    cameraCount: 1,        // Single camera
-    hasNotch: false,       // No notch on iPhone 5s
-    bezelSize: 'large',    // iPhone 5s has larger bezels
-    color: 'Space Gray'    // Common iPhone 5s color
-  };
-  
-  return features;
-}
-
-// Determine phone model from analyzed features
-function determinePhoneFromFeatures(features: any, phoneDatabase: any) {
-  // In real implementation, this would use ML classification
-  // For now, using rule-based logic
-  
-  if (features.screenSize === '4-inch' && features.hasHomeButton && !features.hasNotch) {
-    return phoneDatabase['iPhone 5s'];
-  } else if (features.screenSize === '4.7-inch' && features.hasHomeButton) {
-    return phoneDatabase['iPhone 6'];
-  } else if (features.screenSize === '6.1-inch' && !features.hasHomeButton && features.hasNotch) {
-    return phoneDatabase['iPhone 14'];
-  } else {
-    // Fallback to random selection
-    const models = Object.keys(phoneDatabase);
-    const randomModel = models[Math.floor(Math.random() * models.length)];
-    return phoneDatabase[randomModel];
+    
+    console.log('✅ Damage assessment successful:', result);
+    
+    return {
+      damage_type: result.damage_type || 'unknown',
+      severity: result.severity || 'medium',
+      affected_areas: result.affected_areas || ['unknown'],
+      description: result.description || 'Damage assessment unavailable',
+      estimated_repair_time: result.estimated_repair_time || '1-2 days',
+      confidence: result.confidence || 0.7
+    };
+  } catch (error) {
+    console.error('❌ Damage assessment error:', error);
+    throw new Error(`Damage assessment failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
 
-// Fallback random phone selection
-function getRandomPhoneModel() {
-  const phoneModels = [
-    { make: 'Apple', model: 'iPhone 14 Pro', color: 'Space Black', year: '2022' },
-    { make: 'Apple', model: 'iPhone 13', color: 'Blue', year: '2021' },
-    { make: 'Samsung', model: 'Galaxy S23', color: 'Phantom Black', year: '2023' },
-    { make: 'Google', model: 'Pixel 7', color: 'Obsidian', year: '2022' },
-  ];
-  
-  const randomPhone = phoneModels[Math.floor(Math.random() * phoneModels.length)];
-  return {
-    ...randomPhone,
-    confidence: 0.85 + Math.random() * 0.1
-  };
+// Step 3: Cost Estimation
+async function estimateCosts(phoneDetails: any, damageDetails: any): Promise<{
+  repair_cost: { min: number; max: number; currency: string };
+  replacement_cost: { amount: number; currency: string };
+  confidence: number;
+}> {
+  const costEstimationPrompt = `
+Based on this phone specification and damage assessment, estimate costs.
+
+Phone: ${phoneDetails.model} ${phoneDetails.color} ${phoneDetails.storage || '128GB'}
+Damage: ${damageDetails.damage_type} - ${damageDetails.severity}
+
+Return ONLY a valid JSON object with these fields:
+- repair_cost (object with min, max, currency)
+- replacement_cost (object with amount, currency)
+- confidence (number between 0 and 1)
+
+Example: {"repair_cost": {"min": 300, "max": 600, "currency": "USD"}, "replacement_cost": {"amount": 1299, "currency": "USD"}, "confidence": 0.85}
+`;
+
+  try {
+    console.log('🔍 Step 3: Estimating costs...');
+    
+    const response = await openai.chat.completions.create({
+      model: "gpt-4",
+      messages: [{
+        role: "user",
+        content: costEstimationPrompt
+      }]
+    });
+
+    const result = parseAIResponse(response.choices[0].message.content || '{}', 'cost estimation');
+    
+    // Validate the response
+    const validation = validateResponse(result, TEST_CASES.costEstimation, 'cost estimation');
+    if (!validation.isValid) {
+      console.error(`❌ Cost estimation validation failed:`, validation.errors);
+      throw new Error(`Cost estimation failed validation: ${validation.errors.join(', ')}`);
+    }
+    
+    console.log('✅ Cost estimation successful:', result);
+    
+    return {
+      repair_cost: {
+        min: result.repair_cost?.min || 150,
+        max: result.repair_cost?.max || 300,
+        currency: result.repair_cost?.currency || 'USD'
+      },
+      replacement_cost: {
+        amount: result.replacement_cost?.amount || 500,
+        currency: result.replacement_cost?.currency || 'USD'
+      },
+      confidence: result.confidence || 0.7
+    };
+  } catch (error) {
+    console.error('❌ Cost estimation error:', error);
+    throw new Error(`Cost estimation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 }
 
-// Mock AI analysis function - in production, this would integrate with real AI services
+// Main analysis function using sub-prompts
 async function analyzePhoneDamage(imageUrl: string): Promise<AssessmentResult> {
-  // Simulate AI processing time
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  
-  // Real phone identification
-  const phoneMetadata = await identifyPhoneModel(imageUrl);
-  
-  // Mock damage analysis (in production, use AI vision)
-  const damageTypes = [
-    {
-      description: 'Cracked screen with minor scratches on the back panel',
-      severity: 'medium' as const,
-      affectedAreas: ['Screen', 'Back Panel'],
-      estimatedRepairTime: '2-3 days'
-    },
-    {
-      description: 'Severe water damage with corroded internal components',
-      severity: 'critical' as const,
-      affectedAreas: ['Internal Components', 'Battery', 'Logic Board'],
-      estimatedRepairTime: '5-7 days'
-    },
-    {
-      description: 'Minor cosmetic damage with light scratches',
-      severity: 'low' as const,
-      affectedAreas: ['Back Panel'],
-      estimatedRepairTime: '1 day'
+  const startTime = Date.now();
+  const errors: string[] = [];
+
+  try {
+    console.log('🚀 Starting AI analysis...');
+    
+    // Step 1: Phone Identification
+    let phoneDetails;
+    try {
+      phoneDetails = await identifyPhone(imageUrl);
+    } catch (error) {
+      errors.push(`Phone identification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      phoneDetails = {
+        make: 'Unknown',
+        model: 'Unknown',
+        color: 'Unknown',
+        year: undefined,
+        storage: undefined,
+        screen_size: undefined,
+        confidence: 0.1
+      };
     }
-  ];
-  
-  // Cost estimation based on phone model
-  const costEstimate = getCostEstimate(phoneMetadata.model);
-  
-  const randomDamage = damageTypes[Math.floor(Math.random() * damageTypes.length)];
-  
-  return {
-    phoneMetadata,
-    damageSummary: randomDamage,
-    costEstimate,
-    processingTime: 2.1,
-    timestamp: new Date().toISOString()
-  };
+
+    // Step 2: Damage Assessment
+    let damageDetails;
+    try {
+      damageDetails = await assessDamage(imageUrl);
+    } catch (error) {
+      errors.push(`Damage assessment failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+             damageDetails = {
+         damage_type: 'unknown',
+         severity: 'medium' as const,
+         affected_areas: ['unknown'],
+         description: 'Damage assessment unavailable',
+         estimated_repair_time: '1-2 days',
+         confidence: 0.1
+       };
+    }
+
+    // Step 3: Cost Estimation
+    let costDetails;
+    try {
+      costDetails = await estimateCosts(phoneDetails, damageDetails);
+    } catch (error) {
+      errors.push(`Cost estimation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      costDetails = {
+        repair_cost: {
+          min: 150,
+          max: 300,
+          currency: 'USD'
+        },
+        replacement_cost: {
+          amount: 500,
+          currency: 'USD'
+        },
+        confidence: 0.1
+      };
+    }
+
+    const processingTime = (Date.now() - startTime) / 1000;
+
+    // Log any errors that occurred
+    if (errors.length > 0) {
+      console.warn('⚠️ Some AI analysis steps failed:', errors);
+    }
+
+    return {
+      phoneMetadata: {
+        make: phoneDetails.make,
+        model: phoneDetails.model,
+        color: phoneDetails.color,
+        year: phoneDetails.year,
+        confidence: phoneDetails.confidence
+      },
+      damageSummary: {
+        description: damageDetails.description,
+        severity: damageDetails.severity,
+        affectedAreas: damageDetails.affected_areas,
+        estimatedRepairTime: damageDetails.estimated_repair_time
+      },
+      costEstimate: {
+        repairCost: costDetails.repair_cost,
+        replacementCost: costDetails.replacement_cost,
+        confidence: costDetails.confidence
+      },
+      processingTime,
+      timestamp: new Date().toISOString()
+    };
+
+  } catch (error) {
+    console.error('❌ Analysis error:', error);
+    return getFallbackResult();
+  }
 }
 
-// Get cost estimates based on phone model
-function getCostEstimate(phoneModel: string) {
-  const costDatabase: Record<string, {
-    repairCost: { min: number; max: number; currency: string };
-    replacementCost: { amount: number; currency: string };
-  }> = {
-    'iPhone 5s': {
-      repairCost: { min: 80, max: 150, currency: 'USD' },
-      replacementCost: { amount: 200, currency: 'USD' }
-    },
-    'iPhone 6': {
-      repairCost: { min: 100, max: 200, currency: 'USD' },
-      replacementCost: { amount: 300, currency: 'USD' }
-    },
-    'iPhone 14': {
-      repairCost: { min: 300, max: 600, currency: 'USD' },
-      replacementCost: { amount: 999, currency: 'USD' }
-    },
-    'iPhone 14 Pro': {
-      repairCost: { min: 400, max: 800, currency: 'USD' },
-      replacementCost: { amount: 1299, currency: 'USD' }
-    },
-    'Galaxy S23': {
-      repairCost: { min: 250, max: 500, currency: 'USD' },
-      replacementCost: { amount: 799, currency: 'USD' }
-    }
-  };
-  
-  const costs = costDatabase[phoneModel] || {
-    repairCost: { min: 150, max: 300, currency: 'USD' },
-    replacementCost: { amount: 500, currency: 'USD' }
-  };
-  
+// Fallback result if AI analysis fails
+function getFallbackResult(): AssessmentResult {
   return {
-    ...costs,
-    confidence: 0.75 + Math.random() * 0.2
+    phoneMetadata: {
+      make: 'Unknown',
+      model: 'Unknown',
+      color: 'Unknown',
+      year: undefined,
+      confidence: 0.1
+    },
+    damageSummary: {
+      description: 'Analysis unavailable - please try again or contact support',
+      severity: 'medium',
+      affectedAreas: ['unknown'],
+      estimatedRepairTime: 'Unknown'
+    },
+    costEstimate: {
+      repairCost: {
+        min: 0,
+        max: 0,
+        currency: 'USD'
+      },
+      replacementCost: {
+        amount: 0,
+        currency: 'USD'
+      },
+      confidence: 0.1
+    },
+    processingTime: 0,
+    timestamp: new Date().toISOString()
   };
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<UploadResponse>> {
   try {
     const { imageUrl } = await request.json();
-    
+
     if (!imageUrl) {
       return NextResponse.json({
         success: false,
         error: 'Image URL is required'
       }, { status: 400 });
     }
-    
+
     // Validate URL format
     try {
       new URL(imageUrl);
@@ -264,16 +443,17 @@ export async function POST(request: NextRequest): Promise<NextResponse<UploadRes
         error: 'Invalid image URL format'
       }, { status: 400 });
     }
-    
+
+    console.log('📸 Processing image:', imageUrl);
     const result = await analyzePhoneDamage(imageUrl);
-    
+
     return NextResponse.json({
       success: true,
       result
     });
-    
+
   } catch (error) {
-    console.error('Assessment error:', error);
+    console.error('❌ Assessment error:', error);
     return NextResponse.json({
       success: false,
       error: 'Failed to process image'
